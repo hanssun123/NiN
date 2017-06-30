@@ -42,6 +42,7 @@ import tarfile
 
 from six.moves import urllib
 import tensorflow as tf
+import numpy as np
 
 import cifar10_input
 
@@ -64,8 +65,8 @@ NUM_EXAMPLES_PER_EPOCH_FOR_EVAL = cifar10_input.NUM_EXAMPLES_PER_EPOCH_FOR_EVAL
 
 # Constants describing the training process.
 MOVING_AVERAGE_DECAY = 0.9999     # The decay to use for the moving average.
-NUM_EPOCHS_PER_DECAY = 350.0      # Epochs after which learning rate decays.
-LEARNING_RATE_DECAY_FACTOR = 0.1  # Learning rate decay factor.
+NUM_EPOCHS_PER_DECAY = 1.0      # Epochs after which learning rate decays.
+LEARNING_RATE_DECAY_FACTOR = 0.5**0.05  # Learning rate decay factor.
 INITIAL_LEARNING_RATE = 0.1       # Initial learning rate.
 
 # If a model is trained with multiple GPUs, prefix all Op names with tower_name
@@ -198,7 +199,8 @@ def inference(images):
   # tf.Variable() in order to share variables across multiple GPU training runs.
   # If we only ran this model on a single GPU, we could simplify this function
   # by replacing all instances of tf.get_variable() with tf.Variable().
-  #
+  
+  c=(0.5*(1.0-1.0/np.pi))**0.5
   # conv1
   with tf.variable_scope('conv1') as scope:
     kernel = _variable_with_weight_decay('weights',
@@ -206,8 +208,10 @@ def inference(images):
                                          wd=0.0)
     conv = tf.nn.conv2d(images, kernel, [1, 1, 1, 1], padding='SAME')
     biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.0))
-    pre_activation = tf.nn.bias_add(conv, biases)
-    conv1 = tf.nn.relu(pre_activation, name=scope.name)
+    kernel_norm=tf.norm(tf.reshape(kernel,[75,64]),axis=0)
+    gamma=_variable_on_cpu('gamma',[64],tf.constant_initializer(c*2**0.5))
+    pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
+    conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
     _activation_summary(conv1)
 
   # pool1
@@ -222,18 +226,24 @@ def inference(images):
     kernel = _variable_with_weight_decay('weights',
                                          shape=[5, 5, 64, 64],
                                          wd=0.0)
-    conv = tf.nn.conv2d(norm1, kernel, [1, 1, 1, 1], padding='SAME')
-    biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.1))
+    conv = tf.nn.conv2d(pool1, kernel, [1, 1, 1, 1], padding='SAME')#replaced norm1 with pool1
+    biases = _variable_on_cpu('biases', [64], tf.constant_initializer(0.0))#used to be 0.1
+    kernel_norm=tf.norm(tf.reshape(kernel,[1600,64]),axis=0)
+    gamma=_variable_on_cpu('gamma',[64],tf.constant_initializer(c*2**0.5))
+    pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
+    conv2 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
+    """
     pre_activation = tf.nn.bias_add(conv, biases)
     conv2 = tf.nn.relu(pre_activation, name=scope.name)
+    """
     _activation_summary(conv2)
 
   # norm2
   norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75,
                     name='norm2')
   # pool2
-  pool2 = tf.nn.max_pool(norm2, ksize=[1, 3, 3, 1],
-                         strides=[1, 2, 2, 1], padding='SAME', name='pool2')
+  pool2 = tf.nn.max_pool(conv2, ksize=[1, 3, 3, 1],
+                         strides=[1, 2, 2, 1], padding='SAME', name='pool2')#replaced norm2 with conv2
 
   # local3
   with tf.variable_scope('local3') as scope:
@@ -242,16 +252,19 @@ def inference(images):
     dim = reshape.get_shape()[1].value
     weights = _variable_with_weight_decay('weights', shape=[dim, 384],
                                           wd=0.004)
-    biases = _variable_on_cpu('biases', [384], tf.constant_initializer(0.1))
-    local3 = tf.nn.relu(tf.matmul(reshape, weights) + biases, name=scope.name)
+    biases = _variable_on_cpu('biases', [384], tf.constant_initializer(0.0))#0.1
+    gamma=_variable_on_cpu('gamma',[384],tf.constant_initializer(c*2**0.5))
+    local3 = (tf.nn.relu(tf.matmul(reshape, weights)*gamma/tf.norm(weights,axis=0) + biases, name=scope.name)-(2*np.pi)**-0.5)/c
+    #local3 = tf.nn.relu(tf.matmul(reshape, weights) + biases, name=scope.name)
     _activation_summary(local3)
 
   # local4
   with tf.variable_scope('local4') as scope:
     weights = _variable_with_weight_decay('weights', shape=[384, 192],
                                           wd=0.004)
-    biases = _variable_on_cpu('biases', [192], tf.constant_initializer(0.1))
-    local4 = tf.nn.relu(tf.matmul(local3, weights) + biases, name=scope.name)
+    biases = _variable_on_cpu('biases', [192], tf.constant_initializer(0.0))#0.1
+    gamma=_variable_on_cpu('gamma',[192],tf.constant_initializer(c*2**0.5))
+    local4 = (tf.nn.relu(tf.matmul(local3, weights)*gamma/tf.norm(weights,axis=0) + biases, name=scope.name)-(2*np.pi)**-0.5)#/c
     _activation_summary(local4)
 
   # linear layer(WX + b),

@@ -43,6 +43,11 @@ import tarfile
 from six.moves import urllib
 import tensorflow as tf
 import numpy as np
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import linalg_ops
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import random_ops
+from tensorflow.python.framework import dtypes
 
 import cifar10_input
 
@@ -67,7 +72,7 @@ NUM_EXAMPLES_PER_EPOCH_FOR_EVAL = cifar10_input.NUM_EXAMPLES_PER_EPOCH_FOR_EVAL
 MOVING_AVERAGE_DECAY = 0.9999     # The decay to use for the moving average.
 NUM_EPOCHS_PER_DECAY = 1.0      # Epochs after which learning rate decays.
 LEARNING_RATE_DECAY_FACTOR = 0.5**0.05  # Learning rate decay factor.
-INITIAL_LEARNING_RATE = 0.1       # Initial learning rate.
+INITIAL_LEARNING_RATE = 0.15       # Initial learning rate.
 
 # If a model is trained with multiple GPUs, prefix all Op names with tower_name
 # to differentiate the operations. Note that this prefix is removed from the
@@ -76,6 +81,87 @@ TOWER_NAME = 'tower'
 
 DATA_URL = 'http://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz'
 
+class Initializer(object):
+  """Initializer base class: all initializers inherit from this class.
+  """
+
+  def __call__(self, shape, dtype=None, partition_info=None):
+    raise NotImplementedError
+
+  def get_config(self):
+    """Returns the configuration of the initializer as a JSON-serializable dict.
+    Returns:
+      A JSON-serializable Python dict.
+    """
+    return {}
+
+  @classmethod
+  def from_config(cls, config):
+    """Instantiates an initializer from a configuration dictionary.
+    Example:
+    ```
+    initializer = RandomUniform(-1, 1)
+    config = initializer.get_config()
+    initializer = RandomUniform.from_config(config)
+    ```
+    Arguments:
+      config: A Python dictionary.
+        It will typically be the output of `get_config`.
+    Returns:
+      An Initializer instance.
+    """
+    return cls(**config)
+
+
+class Orthogonal(Initializer):
+  """Initializer that generates an orthogonal matrix.
+  If the shape of the tensor to initialize is two-dimensional, i is initialized
+  with an orthogonal matrix obtained from the singular value decomposition of a
+  matrix of uniform random numbers.
+  If the shape of the tensor to initialize is more than two-dimensional,
+  a matrix of shape `(shape[0] * ... * shape[n - 2], shape[n - 1])`
+  is initialized, where `n` is the length of the shape vector.
+  The matrix is subsequently reshaped to give a tensor of the desired shape.
+  Args:
+    gain: multiplicative factor to apply to the orthogonal matrix
+    dtype: The type of the output.
+    seed: A Python integer. Used to create random seeds. See
+      @{tf.set_random_seed}
+      for behavior.
+  """
+
+  def __init__(self, gain=1.0, seed=None, dtype=dtypes.float32):
+    self.gain = gain
+    self.dtype = dtype
+    self.seed = seed
+
+  def __call__(self, shape, dtype=None, partition_info=None):
+    if dtype is None:
+      dtype = self.dtype
+    # Check the shape
+    if len(shape) < 2:
+      raise ValueError("The tensor to initialize must be "
+                       "at least two-dimensional")
+    # Flatten the input shape with the last dimension remaining
+    # its original shape so it works for conv2d
+    num_rows = 1
+    for dim in shape[:-1]:
+      num_rows *= dim
+    num_cols = shape[-1]
+    flat_shape = (num_rows, num_cols)
+
+    # Generate a random matrix
+    a = random_ops.random_normal(flat_shape, dtype=dtype, seed=self.seed)
+    # Compute the qr factorization
+    u, _, vt = linalg_ops.svd(a, full_matrices=False)
+    return self.gain * array_ops.reshape(vt, shape)
+
+  def get_config(self):
+    return {"gain": self.gain,
+            "seed": self.seed,
+            "dtype": self.dtype.name}
+
+orthogonal_initializer = Orthogonal
 
 def _activation_summary(x):
   """Helper to create summaries for activations.
@@ -129,11 +215,15 @@ def _variable_with_weight_decay(name, shape, wd):
   Returns:
     Variable Tensor
   """
+  num_rows = 1
+  for dim in shape[:-1]:
+    num_rows *= dim
+  num_cols = shape[-1]
   dtype = tf.float16 if FLAGS.use_fp16 else tf.float32
   var = _variable_on_cpu(
       name,
       shape,
-      tf.contrib.layers.xavier_initializer())
+      orthogonal_initializer() if num_rows<num_cols else tf.orthogonal_initializer())#tf.contrib.layers.xavier_initializer()
   if wd is not None:
     weight_decay = tf.multiply(tf.nn.l2_loss(var), wd, name='weight_loss')
     tf.add_to_collection('losses', weight_decay)
@@ -211,7 +301,7 @@ def inference(images):
     gamma=_variable_on_cpu('gamma',[192],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
     conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
 
   # print(images.get_shape())
   # print(conv1.get_shape())
@@ -226,7 +316,7 @@ def inference(images):
     gamma=_variable_on_cpu('gamma',[160],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
     conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
 
   pool1 = tf.nn.max_pool(conv1, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1],
                         padding='SAME', name='pool1')
@@ -242,7 +332,7 @@ def inference(images):
     gamma=_variable_on_cpu('gamma',[96],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
     conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
         # print(conv1.get_shape())
   # shape here is [128, 12, 12, 96] where [batch size, length, width, depth]
     # conv2
@@ -256,7 +346,7 @@ def inference(images):
     gamma=_variable_on_cpu('gamma',[192],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
     conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
 
   with tf.variable_scope('mlp2_1') as scope:
     kernel = _variable_with_weight_decay('weights',
@@ -268,7 +358,7 @@ def inference(images):
     gamma=_variable_on_cpu('gamma',[192],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
     conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
 
   pool2 = tf.nn.avg_pool(conv1, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1],
                       padding='SAME', name='pool1')
@@ -283,7 +373,7 @@ def inference(images):
     gamma=_variable_on_cpu('gamma',[192],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
     conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
 
     # conv3
   with tf.variable_scope('conv3') as scope:
@@ -296,7 +386,7 @@ def inference(images):
     gamma=_variable_on_cpu('gamma',[192],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(gamma*conv/kernel_norm, biases)
     conv1 = (tf.nn.relu(pre_activation, name=scope.name)-(2*np.pi)**-0.5)/c
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
 
   with tf.variable_scope('mlp3_1') as scope:
     kernel = _variable_with_weight_decay('weights',
@@ -308,7 +398,7 @@ def inference(images):
     #gamma=_variable_on_cpu('gamma',[192],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(conv, biases)
     conv1 = tf.nn.relu(pre_activation, name=scope.name)
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
 
   with tf.variable_scope('mlp3_2') as scope:
     kernel = _variable_with_weight_decay('weights',
@@ -320,7 +410,7 @@ def inference(images):
     #gamma=_variable_on_cpu('gamma',[10],tf.constant_initializer(c*2**0.5))
     pre_activation = tf.nn.bias_add(conv, biases)
     conv1 = tf.nn.relu(pre_activation, name=scope.name)
-    _activation_summary(conv1)
+    #_activation_summary(conv1)
         # print(conv1.get_shape())
 
   # gobal average pooling
